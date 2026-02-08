@@ -1,0 +1,441 @@
+---
+title: "DSR Portfolio Optimizer - Performance Report"
+author: "Automated Report"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+params:
+  results_path: "report_data.rds"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+
+# Load libraries
+library(ggplot2)
+library(xts)
+library(zoo)
+library(PerformanceAnalytics)
+library(tidyr)
+library(scales)
+library(knitr)
+
+# Try to load kableExtra for nice tables
+if (requireNamespace("kableExtra", quietly = TRUE)) {
+  library(kableExtra)
+  use_kable_extra <- TRUE
+} else {
+  use_kable_extra <- FALSE
+}
+
+# Source helper functions
+project_root <- if (file.exists("../config.yaml")) normalizePath("..") else normalizePath(".")
+source(file.path(project_root, "R/report_utils.R"))
+source(file.path(project_root, "R/metrics.R"))
+
+# Load results
+results <- readRDS(params$results_path)
+combined <- results$combined_returns
+config <- yaml::read_yaml(file.path(project_root, "config.yaml"))
+```
+
+# Executive Summary {.tabset}
+
+## Key Findings
+
+```{r executive-summary, results='asis'}
+# Compute metrics
+metrics <- compute_all_metrics(combined)
+
+# Final portfolio values
+equity <- cumprod(1 + combined)
+final_values <- tail(equity, 1)
+
+# Use proper markdown formatting
+test_start <- format(results$test_period[1], "%Y-%m-%d")
+test_end <- format(results$test_period[2], "%Y-%m-%d")
+
+cat(sprintf("- **Test Period:** %s to %s\n", test_start, test_end))
+cat(sprintf("- **Rebalance Frequency:** %s\n", results$frequency))
+cat(sprintf("- **Constraints:** %s\n", ifelse(results$use_constraints %||% FALSE, "Enabled (30% max weight)", "Disabled")))
+cat(sprintf("- **Transaction Costs:** %s\n\n", ifelse(results$apply_transaction_costs %||% FALSE, paste0(results$transaction_cost_bps, " bps"), "None")))
+```
+
+### Performance Comparison
+
+```{r metrics-table}
+display_metrics <- format_metrics_table(metrics)
+
+if (use_kable_extra) {
+  kable(display_metrics, align = "c", caption = "Strategy Performance Metrics") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    row_spec(which.max(metrics$Sharpe_Ratio), bold = TRUE, background = "#d4edda")
+} else {
+  kable(display_metrics, align = "c", caption = "Strategy Performance Metrics")
+}
+```
+
+### Final Portfolio Values
+
+Starting with $1.00:
+
+```{r final-values}
+final_df <- data.frame(
+  Strategy = colnames(final_values),
+  `Final Value` = sprintf("$%.2f", as.numeric(final_values)),
+  `Total Return` = sprintf("%.1f%%", (as.numeric(final_values) - 1) * 100),
+  check.names = FALSE
+)
+
+if (use_kable_extra) {
+  kable(final_df, align = "c") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+} else {
+  kable(final_df, align = "c")
+}
+```
+
+## Equity Curves
+
+```{r equity-curves, fig.height=5}
+plot_equity_curves(combined, title = "Cumulative Portfolio Performance")
+```
+
+
+# Monthly Returns Analysis {.tabset}
+
+## Heatmap
+
+```{r monthly-heatmap, fig.height=8}
+plot_monthly_heatmap(combined, title = "Monthly Returns by Strategy (%)")
+```
+
+## Monthly Statistics
+
+```{r monthly-stats}
+monthly_all <- compute_monthly_returns(combined)
+
+# Check if we have valid monthly data
+if (nrow(monthly_all) > 0 && ncol(monthly_all) > 0) {
+  # Convert to matrix to ensure proper apply behavior
+  monthly_mat <- as.matrix(coredata(monthly_all))
+  colnames(monthly_mat) <- colnames(monthly_all)
+
+  monthly_stats <- data.frame(
+    Strategy = colnames(monthly_mat),
+    `Best Month` = sprintf("%.1f%%", apply(monthly_mat, 2, max, na.rm = TRUE) * 100),
+    `Worst Month` = sprintf("%.1f%%", apply(monthly_mat, 2, min, na.rm = TRUE) * 100),
+    `Avg Month` = sprintf("%.1f%%", colMeans(monthly_mat, na.rm = TRUE) * 100),
+    `Positive Months` = sprintf("%.0f%%", colMeans(monthly_mat > 0, na.rm = TRUE) * 100),
+    check.names = FALSE
+  )
+
+  if (use_kable_extra) {
+    kable(monthly_stats, align = "c", caption = "Monthly Return Statistics") %>%
+      kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+  } else {
+    kable(monthly_stats, align = "c", caption = "Monthly Return Statistics")
+  }
+} else {
+  cat("Insufficient data for monthly statistics (test period less than 1 month).\n")
+}
+```
+
+# Rolling Performance {.tabset}
+
+## Rolling Sharpe Ratio
+
+```{r rolling-sharpe, fig.height=5}
+plot_rolling_metrics(combined, metric = "sharpe", window = 126, title = "Rolling 6-Month Sharpe Ratio")
+```
+
+## Rolling Volatility
+
+```{r rolling-vol, fig.height=5}
+plot_rolling_metrics(combined, metric = "volatility", window = 126, title = "Rolling 6-Month Volatility")
+```
+
+# Drawdown Analysis {.tabset}
+
+## Underwater Chart
+
+```{r underwater, fig.height=5}
+plot_underwater(combined, title = "Drawdown (Underwater) Chart")
+```
+
+## Drawdown Statistics
+
+```{r drawdown-stats}
+dd_stats <- compute_drawdown_stats(combined)
+
+dd_display <- data.frame(
+  Strategy = dd_stats$Strategy,
+  `Max Drawdown` = sprintf("%.2f%%", dd_stats$Max_Drawdown),
+  `Avg Drawdown` = sprintf("%.2f%%", dd_stats$Avg_Drawdown),
+  `Time Underwater` = sprintf("%.1f%%", dd_stats$Pct_Underwater),
+  check.names = FALSE
+)
+
+if (use_kable_extra) {
+  kable(dd_display, align = "c", caption = "Drawdown Statistics") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+} else {
+  kable(dd_display, align = "c", caption = "Drawdown Statistics")
+}
+```
+
+# Risk Metrics {.tabset}
+
+## VaR and CVaR
+
+```{r risk-metrics}
+risk_df <- data.frame(
+  Strategy = metrics$Strategy,
+  `VaR (95%)` = metrics$VaR_95_Pct,
+  `CVaR (95%)` = metrics$CVaR_95_Pct,
+  `Max Drawdown` = metrics$Max_Drawdown_Pct,
+  `Calmar Ratio` = sprintf("%.3f", metrics$Calmar_Ratio),
+  check.names = FALSE
+)
+
+if (use_kable_extra) {
+  kable(risk_df, align = "c", caption = "Risk Metrics (Daily)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+} else {
+  kable(risk_df, align = "c", caption = "Risk Metrics (Daily)")
+}
+```
+
+## Risk-Return Scatter
+
+```{r risk-return-scatter, fig.height=5}
+scatter_df <- data.frame(
+  Strategy = metrics$Strategy,
+  Return = metrics$Ann_Return * 100,
+  Volatility = metrics$Ann_Volatility * 100
+)
+
+ggplot(scatter_df, aes(x = Volatility, y = Return, color = Strategy, label = Strategy)) +
+  geom_point(size = 4) +
+  geom_text(vjust = -1, hjust = 0.5, size = 3.5) +
+  labs(
+    title = "Risk-Return Profile",
+    x = "Annualized Volatility (%)",
+    y = "Annualized Return (%)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  ) +
+  scale_color_brewer(palette = "Set1")
+```
+
+# Regime Analysis {.tabset}
+
+## High Volatility Periods
+
+```{r regime-analysis, results='asis'}
+# Identify high-vol regimes using equal-weight as market proxy
+ew_col <- grep("Equal", colnames(combined), value = TRUE)
+if (length(ew_col) > 0) {
+  regimes <- identify_high_vol_regimes(combined[, ew_col], threshold = 0.25, window = 20)
+} else {
+  regimes <- identify_high_vol_regimes(combined[, 1], threshold = 0.25, window = 20)
+}
+
+if (nrow(regimes) > 0) {
+  cat("\nHigh-volatility periods identified (annualized vol > 25%):\n\n")
+
+  regime_display <- data.frame(
+    Period = seq_len(nrow(regimes)),
+    Start = as.character(regimes$Start),
+    End = as.character(regimes$End),
+    Duration = as.numeric(regimes$End - regimes$Start) + 1
+  )
+
+  print(kable(regime_display, align = "c"))
+} else {
+  cat("\nNo high-volatility regimes (>25% annualized) identified in the test period.\n")
+}
+```
+
+## Performance During Stress
+
+```{r regime-performance}
+if (nrow(regimes) > 0) {
+  regime_perf <- compute_regime_performance(combined, regimes)
+
+  if (nrow(regime_perf) > 0) {
+    regime_display <- data.frame(
+      Regime = regime_perf$Regime,
+      Strategy = regime_perf$Strategy,
+      `Total Return` = sprintf("%.1f%%", regime_perf$Total_Return),
+      Volatility = sprintf("%.1f%%", regime_perf$Volatility),
+      `Max DD` = sprintf("%.1f%%", regime_perf$Max_Drawdown),
+      check.names = FALSE
+    )
+
+    if (use_kable_extra) {
+      kable(regime_display, align = "c", caption = "Performance During High-Vol Regimes") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+    } else {
+      kable(regime_display, align = "c", caption = "Performance During High-Vol Regimes")
+    }
+  }
+}
+```
+
+# Weight Analysis {.tabset}
+
+## Average Weights
+
+```{r weight-distribution, fig.height=5}
+if (!is.null(results$dsr$weights_history)) {
+  plot_weight_distribution(results$dsr$weights_history, title = "Average Weight Distribution (Primary Strategy)")
+}
+```
+## Weight Statistics
+
+```{r weight-stats, results='asis'}
+if (!is.null(results$dsr$weights_history)) {
+  weight_stats <- compute_weight_stats(results$dsr$weights_history)
+
+  weight_display <- data.frame(
+    Asset = weight_stats$Asset,
+    `Mean (%)` = sprintf("%.1f", weight_stats$Mean_Weight),
+    `Std (%)` = sprintf("%.1f", weight_stats$Std_Weight),
+    `Min (%)` = sprintf("%.1f", weight_stats$Min_Weight),
+    `Max (%)` = sprintf("%.1f", weight_stats$Max_Weight),
+    check.names = FALSE
+  )
+
+  print(kable(weight_display, align = "c", caption = "Weight Statistics by Asset"))
+
+  cat(sprintf("\n\nPortfolio Concentration (HHI) = %.4f (Equal weight HHI = %.4f)\n",
+              attr(weight_stats, "avg_hhi"), attr(weight_stats, "min_hhi")))
+}
+```
+
+## Weight Over Time
+
+```{r weight-time, fig.height=5}
+if (!is.null(results$dsr$weights_history)) {
+  weights_df <- data.frame(
+    Date = zoo::index(results$dsr$weights_history),
+    coredata(results$dsr$weights_history),
+    check.names = FALSE
+  )
+
+  weights_long <- tidyr::pivot_longer(
+    weights_df, cols = -Date, names_to = "Asset", values_to = "Weight"
+  )
+
+  ggplot(weights_long, aes(x = Date, y = Weight, fill = Asset)) +
+    geom_area(alpha = 0.8) +
+    labs(title = "Portfolio Weight Allocation Over Time", x = "Date", y = "Weight", fill = "Asset") +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    ) +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_brewer(palette = "Set2")
+}
+```
+
+# Turnover Analysis {.tabset}
+
+## Turnover Metrics
+
+```{r turnover-analysis, results='asis'}
+if (!is.null(results$turnover_constrained) || !is.null(results$dsr$weights_history)) {
+  # Source transaction costs module
+  source(file.path(project_root, "R/transaction_costs.R"))
+
+  if (!is.null(results$turnover_constrained) && !is.null(results$turnover_unconstrained)) {
+    turnover_df <- data.frame(
+      Portfolio = c("Constrained", "Unconstrained"),
+      `Total Turnover` = c(
+        sprintf("%.2f", results$turnover_constrained$total_turnover),
+        sprintf("%.2f", results$turnover_unconstrained$total_turnover)
+      ),
+      `Avg per Rebalance` = c(
+        sprintf("%.2f%%", results$turnover_constrained$avg_turnover * 100),
+        sprintf("%.2f%%", results$turnover_unconstrained$avg_turnover * 100)
+      ),
+      `Max Turnover` = c(
+        sprintf("%.2f%%", results$turnover_constrained$max_turnover * 100),
+        sprintf("%.2f%%", results$turnover_unconstrained$max_turnover * 100)
+      ),
+      `Transaction Costs` = c(
+        sprintf("%.2f%%", results$turnover_constrained$total_turnover * 2 * results$transaction_cost_bps / 10000 * 100),
+        sprintf("%.2f%%", results$turnover_unconstrained$total_turnover * 2 * results$transaction_cost_bps / 10000 * 100)
+      ),
+      check.names = FALSE
+    )
+
+    print(kable(turnover_df, align = "c", caption = "Turnover Comparison"))
+  } else {
+    turnover_metrics <- compute_turnover_metrics(results$dsr$weights_history)
+
+    cat(sprintf("- Total Turnover: %.2f (%.0f%%)\n", turnover_metrics$total_turnover, turnover_metrics$total_turnover * 100))
+    cat(sprintf("- Average per Rebalance: %.2f%%\n", turnover_metrics$avg_turnover * 100))
+    cat(sprintf("- Max Single Rebalance: %.2f%%\n", turnover_metrics$max_turnover * 100))
+  }
+}
+```
+
+# Appendix {.tabset}
+
+## Configuration
+
+```{r config-display, results='asis'}
+cat(sprintf("**Assets:** %s\n\n", paste(config$assets$tickers, collapse = ", ")))
+cat(sprintf("**Data Period:** %s to %s\n\n", config$data$start_date, config$data$end_date))
+cat("**Model Parameters:**\n\n")
+cat(sprintf("- Lookback Window: %d days\n", config$model$lookback_window))
+cat(sprintf("- LSTM Hidden Layers: %d -> %d\n", config$model$lstm_hidden_1, config$model$lstm_hidden_2))
+cat(sprintf("- Dropout: %.2f\n", config$model$dropout))
+cat(sprintf("- DSR Eta: %.4f\n\n", config$model$dsr_eta))
+
+cat("**Training Parameters:**\n\n")
+cat(sprintf("- Train/Val/Test Split: %.2f / %.2f / %.2f\n", config$training$train_ratio, config$training$val_ratio, config$training$test_ratio))
+cat(sprintf("- Batch Size: %d\n", config$training$batch_size))
+cat(sprintf("- Learning Rate: %.4f\n\n", config$training$learning_rate))
+
+if (!is.null(config$constraints)) {
+  cat("**Constraints:**\n\n")
+  cat(sprintf("- Max Position Weight: %.0f%%\n", config$constraints$max_position_weight * 100))
+  cat(sprintf("- Min Position Weight: %.0f%%\n", config$constraints$min_position_weight * 100))
+  cat(sprintf("- CVaR Confidence: %.0f%%\n", config$constraints$cvar_confidence * 100))
+}
+```
+
+## About This Report
+
+This report was automatically generated by the DSR Portfolio Optimizer.
+
+**Key Components:**
+
+- **DSR Loss**: Differential Sharpe Ratio - enables gradient-based optimization of Sharpe ratio
+- **LSTM Model**: 2-layer LSTM network predicts portfolio weights
+- **Constraints**: Maximum position weights to limit concentration
+- **Transaction Costs**: Applied at each rebalance based on turnover
+
+**Report Generated:** `r Sys.time()`
+
+*Report generated with R Markdown*
