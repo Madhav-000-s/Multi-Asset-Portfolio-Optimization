@@ -201,7 +201,9 @@ def create_model_from_config(config: dict) -> PortfolioLSTM:
         Initialized PortfolioLSTM model
     """
     num_assets = len(config['assets']['tickers'])
-    num_features = 6 * num_assets  # 6 features per asset
+    # 7 features per asset when sentiment is enabled, 6 otherwise
+    n_feat_per_asset = 7 if config.get('sentiment', {}).get('enabled', False) else 6
+    num_features = n_feat_per_asset * num_assets
 
     model = PortfolioLSTM(
         input_size=num_features,

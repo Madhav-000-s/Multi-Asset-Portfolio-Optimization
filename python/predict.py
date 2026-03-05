@@ -69,16 +69,21 @@ def load_model(model_path: str = None) -> PortfolioLSTM:
     device = get_device()
 
     if model_path is None:
-        model_path = Path(__file__).parent.parent / "models/best_model.pt"
+        # Use sentiment model when sentiment is enabled in config
+        if config.get('sentiment', {}).get('enabled', False):
+            model_path = Path(__file__).parent.parent / "models/best_model_sentiment.pt"
+        else:
+            model_path = Path(__file__).parent.parent / "models/best_model.pt"
     else:
         model_path = Path(model_path)
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found at {model_path}. Run train.py first.")
 
-    # Initialize model architecture
+    # Initialize model architecture (7 features/asset with sentiment, 6 without)
     num_assets = len(config['assets']['tickers'])
-    num_features = 6 * num_assets
+    n_feat_per_asset = 7 if config.get('sentiment', {}).get('enabled', False) else 6
+    num_features = n_feat_per_asset * num_assets
 
     _model = PortfolioLSTM(
         input_size=num_features,
@@ -146,10 +151,21 @@ def get_cached_features() -> pd.DataFrame:
     if _features_cache is not None:
         return _features_cache
 
-    # Load and compute features
+    config = get_config()
     project_root = Path(__file__).parent.parent
     prices = load_prices(project_root / "data/raw/prices.parquet")
-    features = compute_all_features(prices)
+
+    # Load sentiment scores if enabled
+    sentiment_df = None
+    if config.get('sentiment', {}).get('enabled', False):
+        from sentiment import load_sentiment_scores
+        sentiment_df = load_sentiment_scores(
+            project_root / "data/processed/sentiment_scores.parquet"
+        )
+        if sentiment_df.empty:
+            sentiment_df = None
+
+    features = compute_all_features(prices, sentiment_df=sentiment_df)
     _features_cache = zscore_normalize_rolling(features)
 
     return _features_cache

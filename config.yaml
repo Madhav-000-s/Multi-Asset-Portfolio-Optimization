@@ -46,3 +46,10 @@ constraints:
 efficient_frontier:
   n_points: 50
   include_in_report: true
+
+sentiment:
+  enabled: false                  # Set true to add FinBERT alpha signal as 7th feature per asset
+  alphavantage_key: "ZKFXFREB2HB5P9S9"  # Free key from alphavantage.co for historical headlines
+  model_name: "ProsusAI/finbert"  # HuggingFace model identifier
+  batch_size: 32                  # Headlines per FinBERT batch
+  neutral_default: 0.0            # Score for days with no headlines (0 = neutral)

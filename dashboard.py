@@ -21,6 +21,134 @@ st.set_page_config(
 )
 
 ROOT = Path(__file__).parent
+# Fixed model-trained tickers — LSTM checkpoint is locked to these 5 assets.
+BACKTEST_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+
+# ── Python subdirectory on path (for live predict imports) ────────────────────
+import sys as _sys
+_PYTHON_DIR = str(ROOT / "python")
+if _PYTHON_DIR not in _sys.path:
+    _sys.path.insert(0, _PYTHON_DIR)
+
+# ── Live data helpers ─────────────────────────────────────────────────────────
+def fetch_and_append_prices(tickers=None):
+    """
+    Download OHLCV from the day after the current parquet end-date to today.
+    Appends new rows (and any new ticker columns) to prices.parquet in-place.
+    Returns (close_prices_df, last_date_str) for the requested tickers.
+    """
+    if tickers is None:
+        tickers = BACKTEST_TICKERS
+
+    import yfinance as yf
+    from datetime import date, timedelta
+
+    parquet_path = ROOT / "data/raw/prices.parquet"
+    existing = pd.read_parquet(parquet_path)
+    existing.index = pd.to_datetime(existing.index)
+
+    last_existing = existing.index.max().date()
+    fetch_start = last_existing + timedelta(days=1)
+    fetch_end = date.today() + timedelta(days=1)   # yfinance end is exclusive
+
+    if fetch_start >= fetch_end:
+        available = [t for t in tickers if f"{t}_Close" in existing.columns]
+        close = existing[[f"{t}_Close" for t in available]].copy()
+        close.columns = available
+        return close, str(last_existing)
+
+    raw = yf.download(
+        tickers=tickers,
+        start=str(fetch_start),
+        end=str(fetch_end),
+        auto_adjust=True,
+        progress=False,
+        timeout=20,
+    )
+
+    if raw is None or raw.empty:
+        available = [t for t in tickers if f"{t}_Close" in existing.columns]
+        close = existing[[f"{t}_Close" for t in available]].copy()
+        close.columns = available
+        return close, str(last_existing)
+
+    # Flatten MultiIndex: (price_type, ticker) → "AAPL_Close"
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [f"{ticker}_{price_type}" for price_type, ticker in raw.columns]
+    raw.index = pd.to_datetime(raw.index)
+
+    # Concat without restricting columns — new tickers get NaN for old rows
+    combined = pd.concat([existing, raw])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    combined.to_parquet(parquet_path, engine="pyarrow")
+
+    last_date = combined.index.max().date()
+    available = [t for t in tickers if f"{t}_Close" in combined.columns
+                 and combined[f"{t}_Close"].notna().any()]
+    close = combined[[f"{t}_Close" for t in available]].copy()
+    close.columns = available
+    close.index = pd.to_datetime(close.index)
+    return close, str(last_date)
+
+
+def apply_weight_constraints(weights, w_min=0.02, w_max=0.30, max_iter=200):
+    """Project softmax weights onto [w_min, w_max] simplex via iterative clipping."""
+    w = np.array(weights, dtype=float)
+    for _ in range(max_iter):
+        w = np.clip(w, w_min, w_max)
+        total = w.sum()
+        if total > 0:
+            w /= total
+        if np.all(w >= w_min - 1e-9) and np.all(w <= w_max + 1e-9):
+            break
+    return w
+
+
+def compute_live_weights(last_date_str):
+    """Run LSTM prediction for last_date_str. Returns (raw_weights, constrained_weights)."""
+    import predict
+    predict.clear_cache()
+    raw_w = np.array(predict.predict_at_date(last_date_str), dtype=float)
+    return raw_w, apply_weight_constraints(raw_w)
+
+
+@st.cache_data(ttl=300, show_spinner="Fetching live prices and running LSTM model...")
+def load_live_data(fetch_key: str, user_tickers_key: str) -> dict:
+    """Fetch live prices + LSTM weights.
+    fetch_key busts cache on manual refresh.
+    user_tickers_key (comma-joined) busts cache when watchlist changes.
+    """
+    user_tickers = user_tickers_key.split(",")
+    result = {"close_prices": None, "last_date": None,
+               "weights_raw": None, "weights_const": None,
+               "user_tickers": user_tickers, "no_data_tickers": [],
+               "error": None}
+    try:
+        close, last_date = fetch_and_append_prices(user_tickers)
+        raw_w, con_w = compute_live_weights(last_date)
+        no_data = [t for t in user_tickers if t not in close.columns]
+        result.update(close_prices=close, last_date=last_date,
+                      weights_raw=raw_w, weights_const=con_w,
+                      user_tickers=list(close.columns),
+                      no_data_tickers=no_data)
+    except FileNotFoundError as exc:
+        result["error"] = f"Model not found: {exc}. Run python/train.py first."
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+# ── Sentiment data loader ─────────────────────────────────────────────────────
+@st.cache_data
+def load_sentiment_data():
+    """Load pre-computed FinBERT sentiment scores if available."""
+    path = ROOT / "data/processed/sentiment_scores.parquet"
+    if not path.exists():
+        return None
+    df = pd.read_parquet(path)
+    df.index = pd.to_datetime(df.index)
+    return df
+
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
@@ -30,7 +158,7 @@ def load_data():
     weights_unconstrained = pd.read_csv(ROOT / "results/weights_unconstrained.csv", parse_dates=["Date"])
 
     prices = pd.read_parquet(ROOT / "data/raw/prices.parquet")
-    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+    tickers = BACKTEST_TICKERS
     close_prices = prices[[f"{t}_Close" for t in tickers]].copy()
     close_prices.columns = tickers
     close_prices.index = pd.to_datetime(close_prices.index)
@@ -121,6 +249,14 @@ COLORS = {
     "Equal Weight": "#9467bd",
 }
 
+# ── Session state ─────────────────────────────────────────────────────────────
+if "live_fetch_key" not in st.session_state:
+    st.session_state.live_fetch_key = None
+if "live_refresh_ts" not in st.session_state:
+    st.session_state.live_refresh_ts = None
+if "user_tickers" not in st.session_state:
+    st.session_state.user_tickers = list(BACKTEST_TICKERS)
+
 with st.sidebar:
     st.title("📈 DSR Portfolio Optimizer")
     st.markdown("---")
@@ -138,6 +274,54 @@ with st.sidebar:
     st.markdown("**Rebalance:** Weekly · 10 bps costs")
     st.markdown("---")
 
+    st.subheader("Live Data")
+    if st.button("🔄 Refresh Live Data", type="primary", use_container_width=True):
+        from datetime import datetime as _dt
+        st.session_state.live_fetch_key = _dt.now().isoformat()
+        st.session_state.live_refresh_ts = _dt.now()
+        load_live_data.clear()
+        st.rerun()
+    if st.session_state.live_refresh_ts:
+        st.caption(f"Last refreshed: {st.session_state.live_refresh_ts.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        st.caption("Click above to fetch live prices & model weights.")
+
+    # ── Watchlist ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Watchlist (5–15 stocks)")
+    st.caption("Price charts in Live Data tab show these stocks. LSTM model always uses the trained 5.")
+
+    at_min = len(st.session_state.user_tickers) <= 5
+    for t in list(st.session_state.user_tickers):
+        col_t, col_x = st.columns([3, 1])
+        col_t.write(t)
+        if col_x.button(
+            "✕", key=f"rm_{t}",
+            disabled=at_min,
+            help="Minimum 5 stocks" if at_min else f"Remove {t}",
+        ):
+            st.session_state.user_tickers.remove(t)
+            load_live_data.clear()
+            st.rerun()
+
+    at_max = len(st.session_state.user_tickers) >= 15
+    new_ticker = st.text_input(
+        "Add ticker (e.g. NVDA)", key="new_ticker_input",
+        disabled=at_max,
+        placeholder="Disabled — 15 stock maximum" if at_max else "NVDA",
+    )
+    if st.button("+ Add to Watchlist", disabled=at_max or not new_ticker, use_container_width=True):
+        t = new_ticker.strip().upper()
+        if t and t not in st.session_state.user_tickers:
+            st.session_state.user_tickers.append(t)
+            load_live_data.clear()
+            st.rerun()
+        elif t in st.session_state.user_tickers:
+            st.warning(f"{t} is already in the watchlist.")
+
+    st.caption(f"{len(st.session_state.user_tickers)}/15 stocks")
+
+    st.markdown("---")
     report_path = ROOT / "reports/report.html"
     if report_path.exists():
         with open(report_path, "rb") as f:
@@ -157,11 +341,13 @@ all_returns = {
 }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Portfolio Overview",
     "⚖️ Weight Allocation",
     "📈 Analytics",
     "🛡️ Risk Monitor",
+    "🔴 Live Data",
+    "📰 Sentiment",
 ])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -371,8 +557,9 @@ with tab3:
     for name in selected:
         r = all_returns[name]
         full_ann = (1 + r).prod() ** (252 / len(r)) - 1
-        high_vol_r = r[high_vol]
-        low_vol_r = r[~high_vol]
+        hv = high_vol.reindex(r.index, fill_value=False)
+        high_vol_r = r[hv]
+        low_vol_r = r[~hv]
         row = {
             "Strategy": name,
             "Full Period Ann. Return": f"{full_ann:.1%}",
@@ -469,3 +656,311 @@ with tab4:
     risk_tbl["Sortino_Ratio"] = risk_tbl["Sortino_Ratio"].round(3)
     risk_tbl.columns = ["Strategy", "Max Drawdown", "VaR 95%", "CVaR 95%", "Calmar", "Sortino"]
     st.dataframe(risk_tbl.set_index("Strategy"), use_container_width=True)
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Live Data
+# ════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.header("Live Market Data & Current Model Recommendation")
+
+    if st.session_state.live_fetch_key is None:
+        st.info(
+            "Click **🔄 Refresh Live Data** in the sidebar to download the latest prices "
+            "from Yahoo Finance and get the model's current portfolio recommendation."
+        )
+    else:
+        live = load_live_data(
+            st.session_state.live_fetch_key,
+            ",".join(st.session_state.user_tickers),
+        )
+
+        if live["error"]:
+            st.error(f"Could not fetch live data: {live['error']}")
+            st.info("The historical backtest results in the other tabs are still available.")
+        else:
+            last_date      = live["last_date"]
+            close_live     = live["close_prices"]
+            weights_raw    = live["weights_raw"]
+            weights_const  = live["weights_const"]
+            live_tickers   = live["user_tickers"]   # tickers that actually have data
+            no_data        = live["no_data_tickers"]
+
+            st.success(f"Prices current through **{last_date}**")
+
+            if no_data:
+                st.warning(
+                    f"No data found for: **{', '.join(no_data)}**. "
+                    "Check the ticker symbol(s) — they may be invalid or delisted."
+                )
+
+            # ── Section 1: LSTM Weight Recommendation ─────────────────────
+            st.subheader("LSTM Model Recommendation")
+            st.caption(
+                "Left: raw LSTM softmax output (unconstrained). "
+                "Right: after applying position limits [2%, 30%] from config.yaml. "
+                "_Model trained on AAPL · MSFT · GOOGL · AMZN · META — weights shown for these 5 only._"
+            )
+            col_raw, col_con = st.columns(2)
+            with col_raw:
+                fig_raw = go.Figure(go.Pie(
+                    labels=BACKTEST_TICKERS, values=weights_raw, hole=0.4,
+                    marker_colors=px.colors.qualitative.Set2[:5],
+                    textinfo="label+percent",
+                ))
+                fig_raw.update_layout(
+                    title=f"Unconstrained ({last_date})",
+                    height=320, template="plotly_white",
+                )
+                st.plotly_chart(fig_raw, use_container_width=True)
+
+            with col_con:
+                fig_con = go.Figure(go.Pie(
+                    labels=BACKTEST_TICKERS, values=weights_const, hole=0.4,
+                    marker_colors=px.colors.qualitative.Set2[:5],
+                    textinfo="label+percent",
+                ))
+                fig_con.update_layout(
+                    title=f"Constrained ({last_date})",
+                    height=320, template="plotly_white",
+                )
+                st.plotly_chart(fig_con, use_container_width=True)
+
+            # Delta vs last backtest date
+            st.subheader("Live vs Last Backtest Weights (Dec 2024)")
+            last_bt = wc.sort_values("Date").iloc[-1][BACKTEST_TICKERS].values.astype(float)
+            delta_df = pd.DataFrame({
+                "Live Constrained": weights_const,
+                "Last Backtest":    last_bt,
+                "Delta":            weights_const - last_bt,
+            }, index=BACKTEST_TICKERS)
+
+            def _color_delta(v):
+                c = "green" if v > 0.001 else ("red" if v < -0.001 else "")
+                return f"color: {c}"
+
+            st.dataframe(
+                delta_df.style
+                    .format("{:.2%}", subset=["Live Constrained", "Last Backtest"])
+                    .format("{:+.2%}", subset=["Delta"])
+                    .map(_color_delta, subset=["Delta"]),
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+
+            # ── Section 2: Recent Price Performance ───────────────────────
+            N = 60
+            st.subheader(f"Recent Price Performance — Last {N} Trading Days")
+            st.caption(f"Watchlist: {' · '.join(live_tickers)}  ({len(live_tickers)} stocks)")
+            recent = close_live.tail(N).copy()
+            norm = (recent / recent.iloc[0]) * 100
+
+            fig_rec = go.Figure()
+            palette = px.colors.qualitative.Set1 + px.colors.qualitative.Set2
+            for i, t in enumerate(live_tickers):
+                if t not in norm.columns:
+                    continue
+                fig_rec.add_trace(go.Scatter(
+                    x=norm.index, y=norm[t].values, name=t,
+                    line=dict(color=palette[i % len(palette)], width=2),
+                    hovertemplate=f"{t}: %{{y:.1f}}<extra></extra>",
+                ))
+            fig_rec.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.4)
+            fig_rec.update_layout(
+                title=f"Indexed price (base=100 at {recent.index[0].date()})",
+                xaxis_title="Date", yaxis_title="Indexed Price",
+                height=420, template="plotly_white",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_rec, use_container_width=True)
+
+            # Period return summary
+            available_live = [t for t in live_tickers if t in close_live.columns]
+            period_ret = (close_live[available_live].tail(N).iloc[-1]
+                          / close_live[available_live].tail(N).iloc[0] - 1)
+            st.dataframe(
+                period_ret.to_frame(f"{N}-Day Return").T.style.format("{:+.2%}"),
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+
+            # ── Section 3: Raw price table ─────────────────────────────────
+            st.subheader(f"Closing Prices — Last {N} Trading Days")
+            disp = close_live[available_live].tail(N).copy()
+            disp.index = disp.index.strftime("%Y-%m-%d")
+            st.dataframe(disp.style.format("${:.2f}"), use_container_width=True, height=280)
+
+            st.caption(
+                "Live prices via Yahoo Finance (yfinance). LSTM trained on 2018–2024 data; "
+                "predictions extrapolate beyond the training period. "
+                "Backtest metrics in other tabs are frozen at the Dec 2023–Dec 2024 test period."
+            )
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Sentiment
+# ════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.header("FinBERT Sentiment Analysis")
+
+    sentiment_data = load_sentiment_data()
+
+    if sentiment_data is None:
+        st.info(
+            "No sentiment data found. Run the pipeline to generate it:\n\n"
+            "```bash\n"
+            "cd python\n"
+            "python scraper.py          # download headlines (add AV key for historical)\n"
+            "python sentiment.py        # score with FinBERT → data/processed/sentiment_scores.parquet\n"
+            "```\n\n"
+            "Optionally set `sentiment.alphavantage_key` in `config.yaml` for full 2018–2024 coverage."
+        )
+    else:
+        sent = sentiment_data.copy()
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        st.subheader("Current Sentiment Snapshot")
+        latest_sent = sent.iloc[-1]
+        cols_sent = st.columns(len(BACKTEST_TICKERS))
+        for i, t in enumerate(BACKTEST_TICKERS):
+            if t in latest_sent.index:
+                val = latest_sent[t]
+                label = "Positive" if val > 0.1 else ("Negative" if val < -0.1 else "Neutral")
+                delta_color = "normal"
+                cols_sent[i].metric(
+                    label=t,
+                    value=f"{val:+.3f}",
+                    delta=label,
+                    delta_color=delta_color,
+                )
+
+        st.caption(
+            f"Alpha signal = P(positive) − P(negative) via ProsusAI/finbert  |  "
+            f"Latest date: {sent.index[-1].date()}"
+        )
+        st.markdown("---")
+
+        # ── Heatmap: asset × time ─────────────────────────────────────────────
+        st.subheader("Sentiment Heatmap — Asset × Time")
+
+        # Let user pick time window
+        window_opts = {"3 months": 63, "6 months": 126, "1 year": 252, "All": len(sent)}
+        window_label = st.selectbox("Time window", list(window_opts.keys()), index=2)
+        n_days = window_opts[window_label]
+        sent_window = sent[BACKTEST_TICKERS].tail(n_days)
+
+        # Resample to weekly for readability
+        sent_weekly = sent_window.resample("W").mean()
+
+        fig_heat = go.Figure(go.Heatmap(
+            z=sent_weekly.T.values,
+            x=sent_weekly.index.strftime("%Y-%m-%d").tolist(),
+            y=BACKTEST_TICKERS,
+            colorscale=[
+                [0.0,  "#d73027"],
+                [0.35, "#fc8d59"],
+                [0.5,  "#ffffbf"],
+                [0.65, "#91bfdb"],
+                [1.0,  "#1a6faf"],
+            ],
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            colorbar=dict(title="Sentiment", tickvals=[-1, -0.5, 0, 0.5, 1]),
+            hovertemplate="Date: %{x}<br>Ticker: %{y}<br>Sentiment: %{z:.3f}<extra></extra>",
+        ))
+        fig_heat.update_layout(
+            title=f"Weekly Mean Sentiment — {window_label}",
+            xaxis_title="Week",
+            yaxis_title="Ticker",
+            height=300,
+            template="plotly_white",
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Time-series: sentiment vs returns ────────────────────────────────
+        st.subheader("Sentiment vs. Returns Overlay")
+        ticker_sel = st.selectbox("Select ticker", BACKTEST_TICKERS, key="sent_ticker")
+
+        if ticker_sel in sent.columns and ticker_sel in close_prices.columns:
+            sent_ts = sent[ticker_sel].tail(n_days)
+            price_ts = close_prices[ticker_sel].reindex(sent_ts.index, method="ffill")
+            ret_ts = price_ts.pct_change().fillna(0)
+
+            fig_ov = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_ov.add_trace(
+                go.Bar(
+                    x=sent_ts.index, y=sent_ts.values,
+                    name="Sentiment",
+                    marker_color=["#1a6faf" if v >= 0 else "#d73027" for v in sent_ts.values],
+                    opacity=0.7,
+                ),
+                secondary_y=False,
+            )
+            fig_ov.add_trace(
+                go.Scatter(
+                    x=ret_ts.index, y=(1 + ret_ts).cumprod().values,
+                    name=f"{ticker_sel} Cumulative Return",
+                    line=dict(color="#2ca02c", width=2),
+                ),
+                secondary_y=True,
+            )
+            fig_ov.update_layout(
+                title=f"{ticker_sel} — Sentiment vs. Cumulative Return",
+                height=380, template="plotly_white",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            fig_ov.update_yaxes(title_text="Sentiment score", secondary_y=False)
+            fig_ov.update_yaxes(title_text="Cumulative return", secondary_y=True)
+            st.plotly_chart(fig_ov, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Ablation study results ────────────────────────────────────────────
+        st.subheader("Ablation Study: With vs Without Sentiment")
+        ablation_path = ROOT / "results/ablation.csv"
+        if ablation_path.exists():
+            abl = pd.read_csv(ablation_path)
+            display_cols = ["variant", "input_size", "best_val_dsr", "test_dsr", "test_sharpe"]
+            available = [c for c in display_cols if c in abl.columns]
+            st.dataframe(
+                abl[available].rename(columns={
+                    "variant": "Variant",
+                    "input_size": "Input Size",
+                    "best_val_dsr": "Best Val DSR",
+                    "test_dsr": "Test DSR",
+                    "test_sharpe": "Test Sharpe",
+                }).set_index("Variant"),
+                use_container_width=True,
+            )
+            if len(abl) == 2:
+                d_dsr = abl.iloc[1]["best_val_dsr"] - abl.iloc[0]["best_val_dsr"]
+                d_sh = abl.iloc[1]["test_sharpe"] - abl.iloc[0]["test_sharpe"]
+                c1, c2 = st.columns(2)
+                c1.metric(
+                    "Sentiment impact on Val DSR",
+                    f"{d_dsr:+.6f}",
+                    delta=("improved" if d_dsr > 0 else "degraded"),
+                    delta_color="normal" if d_dsr > 0 else "inverse",
+                )
+                c2.metric(
+                    "Sentiment impact on Test Sharpe",
+                    f"{d_sh:+.4f}",
+                    delta=("improved" if d_sh > 0 else "degraded"),
+                    delta_color="normal" if d_sh > 0 else "inverse",
+                )
+        else:
+            st.info(
+                "No ablation results yet. Run `python ablation.py` after sentiment scoring "
+                "to see the with/without comparison."
+            )
+
+        # ── Raw score table ───────────────────────────────────────────────────
+        with st.expander("Raw sentiment scores (last 30 days)"):
+            disp = sent[BACKTEST_TICKERS].tail(30).copy()
+            disp.index = disp.index.strftime("%Y-%m-%d")
+            st.dataframe(disp.style.format("{:+.4f}").background_gradient(
+                cmap="RdYlBu", vmin=-1, vmax=1
+            ), use_container_width=True)

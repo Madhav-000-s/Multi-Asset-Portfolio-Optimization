@@ -281,7 +281,11 @@ def train(
     }
 
     best_val_dsr = float('-inf')
-    best_model_path = models_dir / "best_model.pt"
+    # Save to sentiment-specific checkpoint when sentiment features are enabled
+    if config.get('sentiment', {}).get('enabled', False):
+        best_model_path = models_dir / "best_model_sentiment.pt"
+    else:
+        best_model_path = models_dir / "best_model.pt"
 
     if verbose:
         print(f"\nStarting training for {config['training']['epochs']} epochs...")
