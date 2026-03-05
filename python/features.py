@@ -156,23 +156,32 @@ def compute_sma_ratio(prices: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return sma_ratio
 
 
-def compute_all_features(prices: pd.DataFrame) -> pd.DataFrame:
+def compute_all_features(
+    prices: pd.DataFrame,
+    sentiment_df: pd.DataFrame = None,
+) -> pd.DataFrame:
     """
-    Combine all 6 features for all assets.
+    Combine technical features for all assets, with optional FinBERT sentiment.
 
-    Features per asset:
-    1. log_ret - Log returns
-    2. vol_20d - 20-day rolling volatility (annualized)
-    3. rsi_14 - RSI with 14-day period
-    4. macd - MACD signal line
-    5. bb_pct_b - Bollinger %B
+    Features per asset (base):
+    1. log_ret   - Log returns
+    2. vol_20d   - 20-day rolling volatility (annualized)
+    3. rsi_14    - RSI with 14-day period
+    4. macd      - MACD signal line
+    5. bb_pct_b  - Bollinger %B
     6. sma_ratio - 50d/200d SMA ratio
 
+    When sentiment_df is provided (not None and not empty), adds:
+    7. sentiment - Daily FinBERT alpha signal P(pos) − P(neg) ∈ [−1, +1]
+
     Returns:
-        DataFrame shape: (num_days, 6 * num_assets)
+        DataFrame shape: (num_days, n_features * num_assets)
+        n_features = 6 (no sentiment) or 7 (with sentiment)
     """
     tickers = get_tickers_from_columns(prices)
-    print(f"Computing features for {len(tickers)} tickers: {tickers}")
+    use_sentiment = sentiment_df is not None and not sentiment_df.empty
+    n_feat = 7 if use_sentiment else 6
+    print(f"Computing {n_feat} features for {len(tickers)} tickers: {tickers}")
 
     # Compute each feature type
     log_returns = compute_log_returns(prices, tickers)
@@ -186,9 +195,23 @@ def compute_all_features(prices: pd.DataFrame) -> pd.DataFrame:
     features = pd.concat([log_returns, volatility, rsi, macd, bb_pct, sma_ratio], axis=1)
 
     # Reorder columns by ticker for consistency
+    suffixes = ['log_ret', 'vol_20d', 'rsi_14', 'macd', 'bb_pct_b', 'sma_ratio']
+
+    # Optionally append sentiment as 7th feature per asset
+    if use_sentiment:
+        sentiment_df = sentiment_df.copy()
+        sentiment_df.index = pd.to_datetime(sentiment_df.index)
+        for ticker in tickers:
+            col = f"{ticker}_sentiment"
+            if ticker in sentiment_df.columns:
+                features[col] = sentiment_df[ticker].reindex(features.index, method="ffill").fillna(0.0)
+            else:
+                features[col] = 0.0
+        suffixes = suffixes + ['sentiment']
+
     ordered_cols = []
     for ticker in tickers:
-        for suffix in ['log_ret', 'vol_20d', 'rsi_14', 'macd', 'bb_pct_b', 'sma_ratio']:
+        for suffix in suffixes:
             col = f"{ticker}_{suffix}"
             if col in features.columns:
                 ordered_cols.append(col)
@@ -390,6 +413,10 @@ def prepare_data(config: dict = None) -> tuple[SequenceDataset, SequenceDataset,
     """
     Complete data preparation pipeline.
 
+    When config['sentiment']['enabled'] is True, loads
+    data/processed/sentiment_scores.parquet and appends it as a 7th
+    feature per asset before normalization.
+
     Returns:
         train_dataset, val_dataset, test_dataset, normalized_features
     """
@@ -403,8 +430,22 @@ def prepare_data(config: dict = None) -> tuple[SequenceDataset, SequenceDataset,
     # Get tickers
     tickers = get_tickers_from_columns(prices)
 
-    # Compute features
-    features = compute_all_features(prices)
+    # Optionally load sentiment scores
+    sentiment_df = None
+    if config.get("sentiment", {}).get("enabled", False):
+        from sentiment import load_sentiment_scores
+        sentiment_path = project_root / "data/processed/sentiment_scores.parquet"
+        sentiment_df = load_sentiment_scores(sentiment_path)
+        if sentiment_df.empty:
+            print("WARNING: sentiment enabled in config but no sentiment_scores.parquet found.")
+            print("         Run: python scraper.py && python sentiment.py")
+            print("         Falling back to 6-feature mode.")
+            sentiment_df = None
+        else:
+            print(f"Sentiment scores loaded: {sentiment_df.shape}")
+
+    # Compute features (6 per asset without sentiment, 7 with)
+    features = compute_all_features(prices, sentiment_df=sentiment_df)
 
     # Normalize
     normalized = zscore_normalize_rolling(features)
