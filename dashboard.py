@@ -11,6 +11,13 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from pathlib import Path
 import yaml
+from datetime import datetime as _dt_cls
+
+try:
+    from streamlit_autorefresh import st_autorefresh as _st_autorefresh
+    _AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    _AUTOREFRESH_AVAILABLE = False
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -29,6 +36,36 @@ import sys as _sys
 _PYTHON_DIR = str(ROOT / "python")
 if _PYTHON_DIR not in _sys.path:
     _sys.path.insert(0, _PYTHON_DIR)
+
+# ── Market status ─────────────────────────────────────────────────────────────
+def market_status() -> dict:
+    """Return US equity market open/closed status based on Eastern Time."""
+    import zoneinfo
+    from datetime import time as _time
+    ET = zoneinfo.ZoneInfo("America/New_York")
+    now = _dt_cls.now(tz=ET)
+    t = now.time()
+    is_open = (now.weekday() < 5) and (_time(9, 30) <= t < _time(16, 0))
+    if is_open:
+        close_dt = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        delta = int((close_dt - now).total_seconds())
+        h, m = divmod(delta // 60, 60)
+        detail = f"Closes in {h}h {m:02d}m"
+    else:
+        days = 1
+        while True:
+            cand = now + pd.Timedelta(days=days)
+            if cand.weekday() < 5:
+                open_dt = cand.replace(hour=9, minute=30, second=0, microsecond=0)
+                if open_dt > now:
+                    break
+            days += 1
+        delta = int((open_dt - now).total_seconds())
+        h, m = divmod(delta // 60, 60)
+        detail = f"Opens in {h}h {m:02d}m"
+    return {"is_open": is_open, "label": "OPEN" if is_open else "CLOSED",
+            "detail": detail, "now_et": now}
+
 
 # ── Live data helpers ─────────────────────────────────────────────────────────
 def fetch_and_append_prices(tickers=None):
@@ -274,11 +311,27 @@ with st.sidebar:
     st.markdown("**Rebalance:** Weekly · 10 bps costs")
     st.markdown("---")
 
+    # ── Auto-refresh ──────────────────────────────────────────────────────────
+    st.subheader("Auto-Refresh")
+    if _AUTOREFRESH_AVAILABLE:
+        _ar_label = st.selectbox(
+            "Interval", ["Off", "1 min", "5 min", "15 min"],
+            key="autorefresh_interval",
+        )
+        _ar_ms = {"Off": 0, "1 min": 60_000, "5 min": 300_000, "15 min": 900_000}
+        if _ar_ms[_ar_label] > 0:
+            _st_autorefresh(interval=_ar_ms[_ar_label], key="global_autorefresh")
+            st.caption(f"Page reloads every {_ar_label}.")
+        else:
+            st.caption("Select an interval to enable.")
+    else:
+        st.caption("Run `pip install streamlit-autorefresh` to enable.")
+
+    st.markdown("---")
     st.subheader("Live Data")
     if st.button("🔄 Refresh Live Data", type="primary", use_container_width=True):
-        from datetime import datetime as _dt
-        st.session_state.live_fetch_key = _dt.now().isoformat()
-        st.session_state.live_refresh_ts = _dt.now()
+        st.session_state.live_fetch_key = _dt_cls.now().isoformat()
+        st.session_state.live_refresh_ts = _dt_cls.now()
         load_live_data.clear()
         st.rerun()
     if st.session_state.live_refresh_ts:
@@ -341,13 +394,14 @@ all_returns = {
 }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Portfolio Overview",
     "⚖️ Weight Allocation",
     "📈 Analytics",
     "🛡️ Risk Monitor",
     "🔴 Live Data",
     "📰 Sentiment",
+    "📡 Real-Time Signals",
 ])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -797,6 +851,55 @@ with tab5:
                 "Backtest metrics in other tabs are frozen at the Dec 2023–Dec 2024 test period."
             )
 
+            st.markdown("---")
+
+            # ── Section 4: Today's Intraday Chart ─────────────────────────────
+            st.subheader("Today's Intraday Price (5-Minute Bars)")
+            ms = market_status()
+            status_icon = "🟢" if ms["is_open"] else "🔴"
+            st.caption(
+                f"Market: {status_icon} **{ms['label']}** — {ms['detail']}  |  "
+                f"ET: {ms['now_et'].strftime('%H:%M')}"
+            )
+            try:
+                _sys.path.insert(0, str(ROOT / "python"))
+                from signals import fetch_intraday as _fetch_intraday
+                intraday_data = _fetch_intraday(BACKTEST_TICKERS, interval="5m")
+                if intraday_data:
+                    _intra_ticker = st.selectbox(
+                        "Ticker", list(intraday_data.keys()), key="tab5_intraday_ticker"
+                    )
+                    _bars = intraday_data[_intra_ticker]
+                    _fig_intra = go.Figure()
+                    _fig_intra.add_trace(go.Scatter(
+                        x=_bars.index,
+                        y=_bars["Close"].values,
+                        mode="lines",
+                        name="Price",
+                        line=dict(color="#1f77b4", width=1.5),
+                        fill="tozeroy",
+                        fillcolor="rgba(31,119,180,0.08)",
+                        hovertemplate="%{x|%H:%M}: $%{y:.2f}<extra></extra>",
+                    ))
+                    _fig_intra.update_layout(
+                        title=f"{_intra_ticker} — Today's Session (5m bars)",
+                        xaxis_title="Time (ET)",
+                        yaxis_title="Price ($)",
+                        height=320,
+                        template="plotly_white",
+                    )
+                    if not ms["is_open"]:
+                        _fig_intra.add_annotation(
+                            text="Market closed — showing last trading session",
+                            xref="paper", yref="paper", x=0.5, y=0.95,
+                            showarrow=False, font=dict(color="gray", size=11),
+                        )
+                    st.plotly_chart(_fig_intra, use_container_width=True)
+                else:
+                    st.info("Intraday data unavailable. yfinance may be rate-limited — try again shortly.")
+            except Exception as _e:
+                st.warning(f"Could not load intraday data: {_e}")
+
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 6 — Sentiment
 # ════════════════════════════════════════════════════════════════════════════
@@ -964,3 +1067,213 @@ with tab6:
             st.dataframe(disp.style.format("{:+.4f}").background_gradient(
                 cmap="RdYlBu", vmin=-1, vmax=1
             ), use_container_width=True)
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 7 — Real-Time Signals
+# ════════════════════════════════════════════════════════════════════════════
+with tab7:
+    st.header("Real-Time Technical Signals")
+
+    # ── Market status banner ──────────────────────────────────────────────────
+    ms = market_status()
+    if ms["is_open"]:
+        st.success(f"🟢 Market **OPEN** — {ms['detail']}  |  ET: {ms['now_et'].strftime('%H:%M:%S')}")
+    else:
+        st.error(f"🔴 Market **CLOSED** — {ms['detail']}  |  ET: {ms['now_et'].strftime('%H:%M:%S')}")
+
+    st.caption(
+        "Signals are rule-based (RSI, MACD, SMA, Bollinger Bands, momentum). "
+        "Works for any ticker in the Watchlist — not limited to the trained 5. "
+        f"Last page load: {_dt_cls.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    st.markdown("---")
+
+    # ── Load signals ──────────────────────────────────────────────────────────
+    _signals_path_ok = (ROOT / "python" / "signals.py").exists()
+    if not _signals_path_ok:
+        st.error("python/signals.py not found.")
+    else:
+        _sys.path.insert(0, str(ROOT / "python"))
+        from signals import get_signals, fetch_intraday
+
+        _watchlist = st.session_state.get("user_tickers", list(BACKTEST_TICKERS))
+
+        with st.spinner(f"Computing signals for {len(_watchlist)} ticker(s)..."):
+            try:
+                _sig_df = get_signals(_watchlist, period="1y")
+            except Exception as _exc:
+                _sig_df = None
+                st.error(f"Signal computation failed: {_exc}")
+
+        if _sig_df is not None and not _sig_df.empty:
+
+            # ── Signal summary table ──────────────────────────────────────────
+            st.subheader("Signal Summary")
+
+            def _sig_color(val):
+                colors = {
+                    "STRONG BUY":  "background-color:#1a6faf;color:white",
+                    "BUY":         "background-color:#91bfdb;color:black",
+                    "HOLD":        "background-color:#ffffbf;color:black",
+                    "SELL":        "background-color:#fc8d59;color:black",
+                    "STRONG SELL": "background-color:#d73027;color:white",
+                }
+                for k, v in colors.items():
+                    if k in str(val):
+                        return v
+                return ""
+
+            _disp = _sig_df[["signal", "score", "current_price", "change_pct_1d",
+                              "rsi", "sma50_pts", "sma200_pts", "bb_pct_b", "momentum_5d"]].copy()
+            _disp.columns = ["Signal", "Score", "Price ($)", "1d Change",
+                              "RSI", "vs SMA50", "vs SMA200", "BB %B", "Mom 5d"]
+            _disp["Price ($)"] = _disp["Price ($)"].apply(
+                lambda x: f"${float(x):.2f}" if x is not None else "N/A"
+            )
+            _disp["1d Change"] = _disp["1d Change"].apply(
+                lambda x: f"{float(x):+.2%}" if x is not None else "N/A"
+            )
+            _disp["RSI"] = _disp["RSI"].apply(
+                lambda x: f"{float(x):.1f}" if x is not None else "N/A"
+            )
+            _disp["BB %B"] = _disp["BB %B"].apply(
+                lambda x: f"{float(x):.3f}" if x is not None else "N/A"
+            )
+            _disp["Mom 5d"] = _disp["Mom 5d"].apply(
+                lambda x: f"{float(x):+.2%}" if x is not None else "N/A"
+            )
+            _disp["vs SMA50"]  = _disp["vs SMA50"].apply(
+                lambda x: "▲ Above" if x == 1 else ("▼ Below" if x == -1 else "—")
+            )
+            _disp["vs SMA200"] = _disp["vs SMA200"].apply(
+                lambda x: "▲ Above" if x == 1 else ("▼ Below" if x == -1 else "—")
+            )
+
+            st.dataframe(
+                _disp.style.map(_sig_color, subset=["Signal"]),
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+
+            # ── Intraday chart ────────────────────────────────────────────────
+            st.subheader("Intraday Chart — Today's Session")
+            _intra_sel = st.selectbox(
+                "Select ticker", _watchlist, key="tab7_intraday_ticker"
+            )
+            _intra_interval = st.radio(
+                "Bar interval", ["1m", "5m", "15m"], index=1,
+                horizontal=True, key="tab7_intraday_interval"
+            )
+            with st.spinner("Loading intraday data..."):
+                try:
+                    _intra = fetch_intraday([_intra_sel], interval=_intra_interval)
+                except Exception as _exc:
+                    _intra = {}
+                    st.warning(f"Intraday fetch failed: {_exc}")
+
+            if _intra_sel in _intra and not _intra[_intra_sel].empty:
+                _bars = _intra[_intra_sel]
+                _fig7 = go.Figure()
+                _fig7.add_trace(go.Candlestick(
+                    x=_bars.index,
+                    open=_bars["Open"], high=_bars["High"],
+                    low=_bars["Low"],   close=_bars["Close"],
+                    name=_intra_sel,
+                    increasing_line_color="#2ca02c",
+                    decreasing_line_color="#d62728",
+                ))
+                # Volume bars on secondary axis
+                _fig7 = make_subplots(
+                    rows=2, cols=1, shared_xaxes=True,
+                    row_heights=[0.75, 0.25], vertical_spacing=0.03,
+                )
+                _fig7.add_trace(go.Candlestick(
+                    x=_bars.index,
+                    open=_bars["Open"], high=_bars["High"],
+                    low=_bars["Low"],   close=_bars["Close"],
+                    name="Price",
+                    increasing_line_color="#2ca02c",
+                    decreasing_line_color="#d62728",
+                ), row=1, col=1)
+                _fig7.add_trace(go.Bar(
+                    x=_bars.index, y=_bars["Volume"].values,
+                    name="Volume",
+                    marker_color=[
+                        "#2ca02c" if c >= o else "#d62728"
+                        for o, c in zip(_bars["Open"].values, _bars["Close"].values)
+                    ],
+                    opacity=0.6,
+                ), row=2, col=1)
+                _fig7.update_layout(
+                    title=f"{_intra_sel} — {_intra_interval} bars  "
+                          f"({'Live session' if ms['is_open'] else 'Last trading session'})",
+                    xaxis_rangeslider_visible=False,
+                    height=500, template="plotly_white",
+                    showlegend=False,
+                )
+                _fig7.update_yaxes(title_text="Price ($)", row=1, col=1)
+                _fig7.update_yaxes(title_text="Volume",   row=2, col=1)
+                if not ms["is_open"]:
+                    _fig7.add_annotation(
+                        text="Market closed — showing last trading session",
+                        xref="paper", yref="paper", x=0.5, y=1.03,
+                        showarrow=False, font=dict(color="gray", size=11),
+                    )
+                st.plotly_chart(_fig7, use_container_width=True)
+            else:
+                st.info(
+                    f"No intraday data for **{_intra_sel}**. "
+                    "yfinance may be rate-limited — try again in a moment, "
+                    "or switch to a wider bar interval."
+                )
+
+            st.markdown("---")
+
+            # ── Per-ticker detail expanders ───────────────────────────────────
+            st.subheader("Signal Detail")
+            st.caption("Expand a ticker to see individual indicator breakdown.")
+
+            for _t in _sig_df.index:
+                _r = _sig_df.loc[_t]
+                with st.expander(f"{_t}  {_r.get('signal', '')}  |  Score: {_r.get('score', 0):+d}"):
+                    _dc1, _dc2, _dc3 = st.columns(3)
+                    _dc1.metric("Price", f"${float(_r['current_price']):.2f}",
+                                delta=f"{float(_r['change_pct_1d']):+.2%}" if _r['change_pct_1d'] is not None else None)
+                    _dc2.metric("RSI-14", f"{float(_r['rsi']):.1f}" if _r['rsi'] is not None else "N/A",
+                                delta=f"{int(_r['rsi_pts']):+d} pts")
+                    _dc3.metric("5d Momentum",
+                                f"{float(_r['momentum_5d']):+.2%}" if _r['momentum_5d'] is not None else "N/A",
+                                delta=f"{int(_r['mom_pts']):+d} pts")
+
+                    _dd1, _dd2, _dd3 = st.columns(3)
+                    _dd1.metric("MACD vs Signal",
+                                "Above" if _r['macd_pts'] == 1 else "Below",
+                                delta=f"{int(_r['macd_pts']):+d} pts")
+                    _dd2.metric("vs 50d SMA",
+                                "Above" if _r['sma50_pts'] == 1 else "Below",
+                                delta=f"{int(_r['sma50_pts']):+d} pts")
+                    _dd3.metric("vs 200d SMA",
+                                "Above" if _r['sma200_pts'] == 1 else "Below",
+                                delta=f"{int(_r['sma200_pts']):+d} pts")
+
+                    _bb_val = float(_r['bb_pct_b']) if _r['bb_pct_b'] is not None else 0.5
+                    _bb_label = "Oversold (<15%)" if _bb_val < 0.15 else (
+                        "Overbought (>85%)" if _bb_val > 0.85 else f"Neutral ({_bb_val:.2f})"
+                    )
+                    st.metric("Bollinger %B", _bb_label, delta=f"{int(_r['bb_pts']):+d} pts")
+
+                    # Score bar
+                    _score = int(_r["score"])
+                    _max = 6
+                    _pct = (_score + _max) / (2 * _max)
+                    st.progress(_pct, text=f"Composite score: {_score:+d} / {_max}")
+
+        elif _sig_df is not None and _sig_df.empty:
+            st.warning("No signals computed — check ticker symbols in your watchlist.")
+
+        st.markdown("---")
+        st.caption(
+            "Signals are for informational/educational purposes only and do not constitute "
+            "financial advice. Past technical patterns do not guarantee future performance."
+        )
