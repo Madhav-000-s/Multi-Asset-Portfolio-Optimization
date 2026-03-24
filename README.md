@@ -29,7 +29,7 @@ config.yaml
           → backtest.R   # Walk-forward via reticulate → daily portfolio returns
             → constraints.R  # CVaR + max 30% per asset
               → metrics.R / report_utils.R → results/ + reports/report.html
-                → dashboard.py / shiny/  → interactive dashboard
+                → dashboard.py / portfolio_builder.py  → interactive dashboards
 ```
 
 ### Layer 1 — Data Ingestion (Python)
@@ -54,8 +54,8 @@ config.yaml
 - `R/metrics.R` — Sharpe, Sortino, Calmar, MaxDD, VaR, CVaR via `PerformanceAnalytics`
 
 ### Layer 5 — Presentation
-- `dashboard.py` — Streamlit dashboard (4 tabs: Overview, Weights, Analytics, Risk)
-- `shiny/` — R Shiny dashboard equivalent (requires R)
+- `dashboard.py` — Streamlit backtesting dashboard (4 tabs: Overview, Weights, Analytics, Risk)
+- `portfolio_builder.py` — Standalone Streamlit Portfolio Builder (select any stocks, get LSTM or MPT-optimised allocation + R risk metrics)
 - `reports/report.Rmd` — R Markdown → comprehensive HTML report
 
 ---
@@ -66,15 +66,23 @@ config.yaml
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install yfinance pandas numpy pyarrow ta scikit-learn pyyaml
-pip install streamlit plotly   # for the dashboard
+pip install yfinance pandas numpy pyarrow ta scikit-learn pyyaml scipy
+pip install streamlit plotly   # for the dashboards
 ```
 
-### Run the interactive dashboard
+### Run the backtesting dashboard
 
 ```bash
 streamlit run dashboard.py --server.port 8501
 # Open http://localhost:8501
+```
+
+### Run the Portfolio Builder
+
+```bash
+streamlit run portfolio_builder.py --server.port 8502
+# Open http://localhost:8502
+# Select up to 10 stocks → get optimal allocation powered by LSTM or MPT
 ```
 
 ### Re-train the model
@@ -96,14 +104,11 @@ python data_loader.py    # downloads fresh OHLCV to data/raw/prices.parquet
 ```r
 # Install R packages
 install.packages(c("reticulate", "PortfolioAnalytics", "PerformanceAnalytics",
-                   "xts", "zoo", "shiny", "shinydashboard", "ggplot2",
-                   "plotly", "DT", "scales", "tidyr", "yaml", "rmarkdown"))
+                   "xts", "zoo", "ggplot2", "plotly", "DT",
+                   "scales", "tidyr", "yaml", "rmarkdown"))
 
 # Run full backtest pipeline
 source("R/backtest.R")
-
-# Launch Shiny dashboard
-shiny::runApp("shiny/", port = 3838)
 ```
 
 ---
@@ -113,7 +118,10 @@ shiny::runApp("shiny/", port = 3838)
 ```
 ├── config.yaml                    # Asset universe, dates, hyperparameters
 ├── requirements.txt               # Python dependencies
-├── dashboard.py                   # Streamlit dashboard (no R needed)
+├── dashboard.py                   # Streamlit backtesting dashboard (no R needed)
+├── portfolio_builder.py           # Streamlit Portfolio Builder — LSTM/MPT + R risk metrics
+├── create_presentation.py         # Generates presentation.pptx via python-pptx
+├── presentation.pptx              # 16-slide presentation (bull + bear market results)
 │
 ├── python/
 │   ├── data_loader.py             # OHLCV download + parquet storage
@@ -131,19 +139,16 @@ shiny::runApp("shiny/", port = 3838)
 │   ├── metrics.R                  # Performance metrics + plots
 │   ├── report_utils.R             # Monthly heatmap, rolling metrics, regime analysis
 │   ├── transaction_costs.R        # Turnover tracking + cost deduction
+│   ├── portfolio_risk.R           # PerformanceAnalytics metrics for Portfolio Builder
 │   ├── utils.R                    # Reticulate setup helpers
 │   └── test_bridge.R              # Bridge integration tests
 │
-├── shiny/
-│   ├── global.R                   # Data loading + package setup
-│   ├── ui.R                       # Dashboard layout (4 tabs)
-│   └── server.R                   # Reactive logic
-│
 ├── data/
-│   └── raw/prices.parquet         # OHLCV for 5 assets (2018–2024, 1760 rows)
+│   └── raw/prices.parquet         # OHLCV for 5 assets (2018–present, 2057 rows)
 │
 ├── models/
-│   └── best_model.pt              # Trained checkpoint (val Sharpe: 1.59)
+│   ├── best_model.pt              # Trained checkpoint (val Sharpe: 1.59)
+│   └── best_model_2024_bull.pt    # Retrained on 2018–2021 for bear market test
 │
 ├── results/
 │   ├── backtest_results.rds       # Full R backtest object
@@ -153,7 +158,9 @@ shiny::runApp("shiny/", port = 3838)
 │   ├── equity_curve.png           # Cumulative returns chart
 │   ├── drawdown.png               # Drawdown analysis
 │   ├── weight_allocation.png      # Stacked area allocation
-│   └── efficient_frontier.png     # Risk-return scatter
+│   ├── efficient_frontier.png     # Risk-return scatter
+│   ├── bull_2024/                 # Bull market (Dec 2023–Dec 2024) results
+│   └── bear_2022/                 # Bear market stress test (2022) out-of-sample results
 │
 └── reports/
     ├── report.Rmd                 # R Markdown source
@@ -218,4 +225,4 @@ constraints:
 | ITER 2 | FinBERT sentiment augmentation | Not started |
 | ITER 3 | CVaR constraints + efficient frontier | Done |
 | ITER 4 | Performance report (R Markdown) | Done |
-| ITER 5 | Shiny + Streamlit dashboard | Done |
+| ITER 5 | Streamlit dashboard + Portfolio Builder | Done |

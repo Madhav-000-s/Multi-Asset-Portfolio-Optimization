@@ -423,9 +423,18 @@ def prepare_data(config: dict = None) -> tuple[SequenceDataset, SequenceDataset,
     if config is None:
         config = load_config()
 
-    # Load prices
+    # Load prices — filter to configured model tickers only so watchlist
+    # additions (e.g. NVDA) with sparse history don't wipe rows via dropna()
     project_root = Path(__file__).parent.parent
     prices = load_prices(project_root / "data/raw/prices.parquet")
+    configured_tickers = config['assets']['tickers']
+    cols_to_keep = [c for c in prices.columns if c.split('_')[0] in configured_tickers]
+    prices = prices[cols_to_keep]
+
+    # Respect config end_date so bear/bull experiments don't leak future data
+    end_date = config.get('data', {}).get('end_date')
+    if end_date:
+        prices = prices[prices.index <= pd.Timestamp(end_date)]
 
     # Get tickers
     tickers = get_tickers_from_columns(prices)

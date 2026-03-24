@@ -896,11 +896,87 @@ def slide_results(prs):
         "LSTM (128→64)  ·  DSR loss (η=0.01)  ·  PortfolioAnalytics constraints",
         0.4, 5.15, 9.2, 0.65, font_size=11, color=GREY, align=PP_ALIGN.CENTER)
 
-    _add_textbox(sld,
-        "Thanks for listening   —   Questions?",
-        0.4, 5.95, 9.2, 0.75,
-        font_size=20, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
     _add_rect(sld, 0, SLD_H - 0.1, SLD_W, 0.1, ORANGE)
+
+
+def slide_bear_market(prs):
+    layout = prs.slide_layouts[6]
+    sld = prs.slides.add_slide(layout)
+    _set_bg(sld, NAVY)
+    _add_rect(sld, 0, 0, SLD_W, 0.1, ORANGE)
+
+    _add_textbox(sld, "Stress Test: Does it hold in a Bear Market?",
+                 0.3, 0.15, 9.4, 0.7,
+                 font_size=22, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+
+    _add_textbox(sld, "Retrained on 2018–2021 only  ·  Tested on 2022 (out-of-sample crash year)",
+                 0.3, 0.82, 9.4, 0.4,
+                 font_size=12, color=GREY, align=PP_ALIGN.CENTER)
+
+    # ── Matplotlib bar chart ─────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
+    fig.patch.set_facecolor(mNAVY)
+
+    datasets = [
+        ("Bull Market 2024\n(Dec 2023 – Dec 2024)",
+         ["DSR Constrained", "Equal Weight"],
+         [52.6, 43.2],
+         mBLUE, "#5d6d7e"),
+        ("Bear Market 2022\n(Jan – Dec 2022)",
+         ["DSR Constrained", "Equal Weight"],
+         [-34.3, -39.8],
+         mBLUE, "#5d6d7e"),
+    ]
+
+    for ax, (title, labels, vals, c1, c2) in zip(axes, datasets):
+        colors = [c1, c2]
+        bars = ax.bar(labels, vals, color=colors, width=0.5, zorder=3)
+        ax.set_facecolor(mNAVY)
+        ax.tick_params(colors="white", labelsize=9)
+        ax.spines["bottom"].set_color("#aed6f1")
+        ax.spines["left"].set_color("#aed6f1")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.yaxis.label.set_color("white")
+        ax.set_ylabel("Ann. Return (%)", color="white", fontsize=9)
+        ax.set_title(title, fontsize=10, fontweight="bold", color="white", pad=6)
+        ax.axhline(0, color="#aed6f1", lw=0.8, linestyle="--")
+
+        for bar, val in zip(bars, vals):
+            label = f"{val:+.1f}%"
+            ypos = val + (1.5 if val >= 0 else -3.5)
+            ax.text(bar.get_x() + bar.get_width()/2, ypos,
+                    label, ha="center", va="bottom", fontsize=11,
+                    fontweight="bold", color="white")
+
+        # Outperformance annotation
+        diff = vals[0] - vals[1]
+        ax.annotate(f"↑ +{diff:.1f}pp\nvs benchmark",
+                    xy=(0.5, 0.92), xycoords="axes fraction",
+                    ha="center", fontsize=9, color=mORANGE, fontweight="bold")
+
+    plt.tight_layout(pad=1.2)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=mNAVY)
+    buf.seek(0)
+    plt.close(fig)
+    sld.shapes.add_picture(buf, Inches(0.25), Inches(1.35), Inches(9.5), Inches(3.9))
+
+    # ── Takeaway banner ──────────────────────────────────────────────────────
+    _add_rect(sld, 0.3, 5.4, 9.4, 0.6, GREEN)
+    _add_textbox(sld,
+        "Model consistently outperforms the equal-weight benchmark "
+        "in both bull (+9.4 pp) and bear (+5.5 pp) markets",
+        0.3, 5.4, 9.4, 0.6,
+        font_size=13, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+
+    _add_rect(sld, 0, SLD_H - 0.1, SLD_W, 0.1, ORANGE)
+
+    # ── Thank you footer ─────────────────────────────────────────────────────
+    _add_textbox(sld, "Thank you",
+                 0.3, 6.1, 9.4, 0.5,
+                 font_size=16, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -913,21 +989,22 @@ def main():
     prs.slide_height = Inches(SLD_H)
 
     print("Building slides...")
-    slide_title(prs);                      print("  1/15  Title")
-    slide_what_are_we_building(prs);       print("  2/15  What are we building?")
-    slide_architecture(prs);              print("  3/15  System architecture diagram")
-    slide_data_flow(prs);                 print("  4/15  Data flow diagram")
-    slide_layer1(prs);                    print("  5/15  Layer 1 — Data ingestion")
-    slide_layer2(prs);                    print("  6/15  Layer 2 — Feature engineering")
-    slide_layer3(prs);                    print("  7/15  Layer 3 — LSTM + DSR")
-    slide_r_overview(prs);                print("  8/15  R overview — component diagram")
-    slide_reticulate(prs);                print("  9/15  R-Python sequence diagram")
-    slide_backtest(prs);                  print(" 10/15  Walk-forward backtest")
-    slide_cvar(prs);                      print(" 11/15  CVaR constraint flow")
-    slide_performance_analytics(prs);     print(" 12/15  PerformanceAnalytics metrics")
-    slide_layer5(prs);                    print(" 13/15  Dashboard & reporting")
-    slide_why_r_python(prs);              print(" 14/15  Why R + Python?")
-    slide_results(prs);                   print(" 15/15  Results + thank you")
+    slide_title(prs);                      print("  1/16  Title")
+    slide_what_are_we_building(prs);       print("  2/16  What are we building?")
+    slide_architecture(prs);              print("  3/16  System architecture diagram")
+    slide_data_flow(prs);                 print("  4/16  Data flow diagram")
+    slide_layer1(prs);                    print("  5/16  Layer 1 — Data ingestion")
+    slide_layer2(prs);                    print("  6/16  Layer 2 — Feature engineering")
+    slide_layer3(prs);                    print("  7/16  Layer 3 — LSTM + DSR")
+    slide_r_overview(prs);                print("  8/16  R overview — component diagram")
+    slide_reticulate(prs);                print("  9/16  R-Python sequence diagram")
+    slide_backtest(prs);                  print(" 10/16  Walk-forward backtest")
+    slide_cvar(prs);                      print(" 11/16  CVaR constraint flow")
+    slide_performance_analytics(prs);     print(" 12/16  PerformanceAnalytics metrics")
+    slide_layer5(prs);                    print(" 13/16  Dashboard & reporting")
+    slide_why_r_python(prs);              print(" 14/16  Why R + Python?")
+    slide_results(prs);                   print(" 15/16  Bull market results")
+    slide_bear_market(prs);               print(" 16/16  Bear market stress test")
 
     out = "presentation.pptx"
     prs.save(out)

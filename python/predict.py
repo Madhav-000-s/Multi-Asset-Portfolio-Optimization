@@ -155,6 +155,12 @@ def get_cached_features() -> pd.DataFrame:
     project_root = Path(__file__).parent.parent
     prices = load_prices(project_root / "data/raw/prices.parquet")
 
+    # Filter to model tickers only — watchlist additions to the parquet (e.g. NVDA)
+    # introduce NaN-heavy columns that cause dropna() to wipe all rows.
+    configured_tickers = config['assets']['tickers']
+    cols_to_keep = [c for c in prices.columns if c.split('_')[0] in configured_tickers]
+    prices = prices[cols_to_keep]
+
     # Load sentiment scores if enabled
     sentiment_df = None
     if config.get('sentiment', {}).get('enabled', False):

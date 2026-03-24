@@ -411,15 +411,24 @@ run_backtest <- function(test_split_ratio = 0.15, frequency = "weekly") {
   apply_tc <- config$backtest$apply_transaction_costs %||% FALSE
   tc_bps <- config$backtest$transaction_cost_bps %||% 10
 
-  # Determine test period
+  # Determine test period — env vars override the ratio-based calculation
+  # (used for bear/bull experiments: BACKTEST_START_DATE=2022-01-01 Rscript backtest.R)
   all_dates <- zoo::index(prices)
   n_dates <- length(all_dates)
 
-  test_start_idx <- floor(n_dates * (train_ratio + val_ratio)) + 1
-  test_start <- all_dates[test_start_idx]
-  test_end <- all_dates[n_dates]
+  env_start <- Sys.getenv("BACKTEST_START_DATE", unset = "")
+  env_end   <- Sys.getenv("BACKTEST_END_DATE",   unset = "")
 
-  cat(sprintf("\nTest period: %s to %s\n", test_start, test_end))
+  if (nchar(env_start) > 0 && nchar(env_end) > 0) {
+    test_start <- as.Date(env_start)
+    test_end   <- as.Date(env_end)
+    cat(sprintf("\nTest period (override): %s to %s\n", test_start, test_end))
+  } else {
+    test_start_idx <- floor(n_dates * (train_ratio + val_ratio)) + 1
+    test_start <- all_dates[test_start_idx]
+    test_end <- all_dates[n_dates]
+    cat(sprintf("\nTest period: %s to %s\n", test_start, test_end))
+  }
   cat(sprintf("Constraints: %s\n", ifelse(use_constraints, "ENABLED", "disabled")))
   cat(sprintf("Transaction costs: %s (%d bps)\n",
               ifelse(apply_tc, "ENABLED", "disabled"), tc_bps))
