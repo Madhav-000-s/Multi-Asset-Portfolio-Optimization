@@ -40,8 +40,6 @@ data/raw/*.csv
 models/*.pt
 models/*.pth
 
-# Results (regeneratable)
-results/
 
 # Reports (generated output)
 reports/*.html
